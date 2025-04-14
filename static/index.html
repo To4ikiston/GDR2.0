@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Система обнаружения дрона</title>
+</head>
+<body>
+  <h1>Система обнаружения дрона</h1>
+
+  <div>
+    <button id="startBtn">Активировать</button>
+    <button id="stopBtn">Отключить</button>
+  </div>
+
+  <p>Текущее состояние: <span id="statusSpan">ВЫКЛЮЧЕНА</span></p>
+  <p>Последняя корреляция: <span id="corrSpan">-</span></p>
+  <p id="alertP" style="display:none; color:red; font-weight:bold; font-size:1.2em;">
+     ДРОН ОБНАРУЖЕН!
+  </p>
+
+  <audio id="alarmAudio" src="alarm.wav"></audio>
+  <!-- Если выложите alarm.wav в /static, то меняйте путь.
+       Может потребоваться клик, чтобы разрешить автоплей! -->
+
+  <script src="main.js"></script>
+</body>
+</html>
