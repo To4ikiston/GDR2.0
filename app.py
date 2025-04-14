@@ -7,6 +7,13 @@ import time
 
 app = FastAPI()
 
+# подключаем папку static
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def redirect_root():
+    return RedirectResponse(url="/static/index.html")
+
 SAMPLE_RATE = 16000
 THRESHOLD = 0.95
 COOLDOWN = 5.0  # 5 сек между срабатываниями
