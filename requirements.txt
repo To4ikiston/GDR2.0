@@ -4,3 +4,4 @@ websockets
 numpy
 librosa
 matplotlib
+scikit-learn
