@@ -23,6 +23,7 @@ def root():
 ################################################################################
 # Глобальные переменные
 ################################################################################
+corr_streak = 0
 
 SAMPLE_RATE = 16000
 
@@ -32,7 +33,7 @@ drone_mfcc = None
 # Для каждой сессии можно было бы хранить настройки, 
 # но пока упростим: один глобальный порог, одна длительность.
 # В идеале — сделать хранение в словаре по session id. 
-global_threshold = 0.95
+global_threshold = 0.7
 global_buffer_duration = 3  # секунды
 
 # Кольцевой буфер
@@ -68,6 +69,7 @@ def compute_correlation(ref_mfcc, test_audio):
         return 0.0
     try:
         test_audio = clamp_audio(test_audio)
+        test_audio = normalize_audio(test_audio)
         test_mfcc = librosa.feature.mfcc(y=test_audio, sr=SAMPLE_RATE, n_mfcc=13)
         ml = min(ref_mfcc.shape[1], test_mfcc.shape[1])
         s_trim = ref_mfcc[:, :ml]
@@ -75,7 +77,7 @@ def compute_correlation(ref_mfcc, test_audio):
         corr = np.corrcoef(s_trim.flatten(), t_trim.flatten())[0, 1]
         if np.isnan(corr):
             corr = 0.0
-        return corr
+        return corr if corr > 0 else 0
     except Exception as ex:
         print("compute_correlation error:", ex)
         return 0.0
@@ -101,6 +103,11 @@ def generate_spectrogram(wave: np.ndarray):
     buf.seek(0)
     b64_str = base64.b64encode(buf.read()).decode('utf-8')
     return "data:image/png;base64," + b64_str
+
+def normalize_audio(x: np.ndarray) -> np.ndarray:
+    return x / np.max(np.abs(x)) if np.max(np.abs(x)) != 0 else x
+
+
 
 
 ################################################################################
@@ -143,8 +150,13 @@ async def websocket_endpoint(ws: WebSocket):
 
                     # Проверка дрона
                     detected = False
+                    if corr > global_threshold:
+                        corr_streak += 1
+                    else:
+                        corr_streak = 0
+
                     now = time.time()
-                    if corr >= global_threshold and (now - last_detection_time > COOLDOWN):
+                    if corr_streak >= 2 and (now - last_detection_time > COOLDOWN):
                         detected = True
                         last_detection_time = now
 
