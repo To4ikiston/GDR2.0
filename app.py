@@ -5,6 +5,7 @@ import numpy as np
 import librosa
 import time
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
 app = FastAPI()
 
