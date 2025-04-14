@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse
 import numpy as np
 import librosa
 import time
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
