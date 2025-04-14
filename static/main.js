@@ -1,8 +1,11 @@
 let audioContext;
 let mediaStream;
-let processorNode;
+let workletNode;
 let websocket;
-let isRunning = false;
+let isActive = false;
+
+let threshold = 0.95;
+let bufferDuration = 3;
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
@@ -10,116 +13,170 @@ const statusSpan = document.getElementById("statusSpan");
 const corrSpan = document.getElementById("corrSpan");
 const alertP = document.getElementById("alertP");
 const alarmAudio = document.getElementById("alarmAudio");
+const spectrogramImg = document.getElementById("spectrogram");
 
-// При нажатии "Активировать"
+const thresholdRange = document.getElementById("thresholdRange");
+const bufferRange = document.getElementById("bufferRange");
+const thrVal = document.getElementById("thrVal");
+const bufVal = document.getElementById("bufVal");
+
+// Chart.js setup
+let ctx = document.getElementById('myChart').getContext('2d');
+let corrChart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Корреляция',
+      data: [],
+      borderColor: 'blue',
+      fill: false
+    }]
+  },
+  options: {
+    scales: {
+      y: { min: 0, max: 1 }
+    }
+  }
+});
+
+thresholdRange.oninput = () => {
+  threshold = parseFloat(thresholdRange.value);
+  thrVal.textContent = threshold.toFixed(2);
+  sendParams();
+};
+
+bufferRange.oninput = () => {
+  bufferDuration = parseInt(bufferRange.value);
+  bufVal.textContent = bufferDuration;
+  sendParams();
+};
+
+// отправить новые параметры на сервер
+function sendParams() {
+  if (websocket && websocket.readyState === WebSocket.OPEN) {
+    const msg = `PARAMS|threshold=${threshold},buffer=${bufferDuration}`;
+    websocket.send(msg);
+  }
+}
+
+// при нажатии "Активировать"
 startBtn.onclick = async () => {
-  if (isRunning) return;
+  if (isActive) return;
+  isActive = true;
 
   try {
-    // Запрашиваем микрофон
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioContext = new AudioContext({ sampleRate: 16000 });
+    await audioContext.audioWorklet.addModule("worklet-processor.js");
+
     const source = audioContext.createMediaStreamSource(mediaStream);
+    workletNode = new AudioWorkletNode(audioContext, "pcm-writer");
 
-    // Создаем ScriptProcessor / AudioWorklet / MediaStreamTrackProcessor
-    // Пример: createScriptProcessor(4096, 1, 1)
-    processorNode = audioContext.createScriptProcessor(4096, 1, 1);
-
-    // Когда приходят аудиоданные
-    processorNode.onaudioprocess = (event) => {
-      // Получаем PCM из inputBuffer
-      const inputBuffer = event.inputBuffer.getChannelData(0);
-      // Преобразуем Float32 -> Int16 (сервер ждет int16)
-      const int16Data = new Int16Array(inputBuffer.length);
-      for (let i = 0; i < inputBuffer.length; i++) {
-        // от -1..1 => -32768..32767
-        let sample = inputBuffer[i] * 32768;
-        if (sample > 32767) sample = 32767;
-        if (sample < -32768) sample = -32768;
-        int16Data[i] = sample;
-      }
-
-      // Отправляем на сервер по WebSocket
+    // когда из ворклет-процессора приходят данные (int16 -> base64)
+    workletNode.port.onmessage = (event) => {
       if (websocket && websocket.readyState === WebSocket.OPEN) {
-        websocket.send(int16Data.buffer);
+        const base64data = btoa(String.fromCharCode(...new Uint8Array(event.data.buffer)));
+        // Отправляем как TEXT: "AUDIO|{base64}"
+        websocket.send("AUDIO|" + base64data);
       }
     };
 
-    source.connect(processorNode);
-    processorNode.connect(audioContext.destination); // Или audioContext.createGain() без выхода, чтобы не слышать эхо
+    source.connect(workletNode).connect(audioContext.destination);
 
-    // Открываем WebSocket
-    websocket = new WebSocket(`wss://${window.location.host}/ws`);
-    // Если локально: `ws://localhost:8000/ws` или `wss://YOUR_DOMAIN/ws`
-    
+    // Установим WebSocket
+    let proto = (location.protocol === "https:") ? "wss" : "ws";
+    let wsUrl = `${proto}://${location.host}/ws`;
+    console.log("[JS] Connecting to:", wsUrl);
+    websocket = new WebSocket(wsUrl);
+
     websocket.onopen = () => {
-      console.log("WS connected.");
+      console.log("[WS] connected.");
       statusSpan.textContent = "РАБОТАЕТ";
+      // Сразу отправим текущие настройки
+      sendParams();
     };
+
     websocket.onmessage = (msg) => {
-      // Сервер присылает строку вида "0.853|false" => corr|detected
-      const parts = msg.data.split("|");
-      if (parts.length === 2) {
-        const corr = parseFloat(parts[0]);
-        const detected = (parts[1] === "true");
-        corrSpan.textContent = corr.toFixed(3);
-        
-        if (detected) {
-          // Показываем надпись
-          alertP.style.display = "inline";
-          // Проигрываем alarm (может быть заблокирован автоплей!)
-          alarmAudio.currentTime = 0;
-          alarmAudio.play().catch(err => {
-            console.log("Autoplay blocked:", err);
-          });
-        } else {
-          alertP.style.display = "none";
+      // либо JSON, либо text
+      if (msg.data.startsWith && msg.data.startsWith("PARAMS|")) {
+        // игнорим
+      } else {
+        try {
+          let data = JSON.parse(msg.data);
+          if (data.type === "ANALYSIS") {
+            let corr = data.corr;
+            let detected = data.detected;
+            let spec = data.spectrogram;
+            let hist = data.history; // массив последних corr
+
+            corrSpan.textContent = corr.toFixed(3);
+            if (detected) {
+              alertP.style.display = "block";
+              alarmAudio.currentTime = 0;
+              alarmAudio.play().catch(err => console.log("Autoplay blocked:", err));
+            } else {
+              alertP.style.display = "none";
+            }
+
+            // Обновляем спектрограмму
+            spectrogramImg.src = spec;
+
+            // Обновляем график
+            corrChart.data.labels = hist.map((_, i) => i); // просто индексы
+            corrChart.data.datasets[0].data = hist;
+            corrChart.update();
+
+          } else if (data.type === "PARAMS_ACK") {
+            console.log("Params ack:", data);
+          }
+        } catch (ex) {
+          console.log("[WS] Not JSON?", msg.data);
         }
       }
     };
+
     websocket.onclose = () => {
-      console.log("WS closed.");
+      console.log("[WS] closed.");
       statusSpan.textContent = "ВЫКЛЮЧЕНА";
       corrSpan.textContent = "-";
       alertP.style.display = "none";
+      spectrogramImg.src = "";
+      // очистим график
+      corrChart.data.labels = [];
+      corrChart.data.datasets[0].data = [];
+      corrChart.update();
     };
 
-    isRunning = true;
-    statusSpan.textContent = "РАБОТАЕТ";
-  } catch (e) {
-    console.error("Error in startBtn:", e);
-    alert("Не удалось получить доступ к микрофону.");
+  } catch (err) {
+    console.error("Error starting audio:", err);
+    alert("Не удалось получить доступ к микрофону. " + err);
+    isActive = false;
   }
 };
 
-// При нажатии "Отключить"
+// при нажатии "Отключить"
 stopBtn.onclick = () => {
-  if (!isRunning) return;
-  isRunning = false;
+  if (!isActive) return;
+  isActive = false;
 
-  // Отключаем mediaStream
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
-  }
-  mediaStream = null;
-
-  // Закрываем AudioContext
-  if (processorNode) {
-    processorNode.disconnect();
-    processorNode = null;
+    mediaStream = null;
   }
   if (audioContext) {
     audioContext.close();
     audioContext = null;
   }
-
-  // Закрываем WebSocket
   if (websocket) {
     websocket.close();
     websocket = null;
   }
-
   statusSpan.textContent = "ВЫКЛЮЧЕНА";
   corrSpan.textContent = "-";
   alertP.style.display = "none";
+  spectrogramImg.src = "";
+  corrChart.data.labels = [];
+  corrChart.data.datasets[0].data = [];
+  corrChart.update();
 };
