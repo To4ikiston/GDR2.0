@@ -5,6 +5,7 @@ import librosa
 import io
 import base64
 import matplotlib.pyplot as plt
+import pickle  # чтобы загрузить ML-модель
 
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +14,7 @@ from collections import deque
 
 app = FastAPI()
 
-# Подключаем /static
+# Подключаем /static (для index.html, main.js, alarm.wav)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -23,48 +24,66 @@ def root():
 ################################################################################
 # Глобальные переменные
 ################################################################################
-corr_streak = 0
 
 SAMPLE_RATE = 16000
 
-# Храним эталон дрона (MFCC)
+# --------------------- ПАРАМЕТРЫ ДЛЯ КОРРЕЛЯЦИИ ---------------------
+# Храним эталон дрона (MFCC) для старого метода
 drone_mfcc = None
+global_threshold = 0.7        # Порог сходства
+global_buffer_duration = 3    # Длина буфера (сек)
+COOLDOWN = 5.0                # Задержка повторного срабатывания
 
-# Для каждой сессии можно было бы хранить настройки, 
-# но пока упростим: один глобальный порог, одна длительность.
-# В идеале — сделать хранение в словаре по session id. 
-global_threshold = 0.7
-global_buffer_duration = 3  # секунды
+corr_streak = 0               # Считаем подряд успехи корреляции
+last_detection_time = 0.0     # Время последнего срабатывания
 
-# Кольцевой буфер
+# Кольцевой буфер (чтобы накапливать 3 сек звука)
 RING_BUFFER = deque()
 RING_BUFFER_MAXSIZE = SAMPLE_RATE * global_buffer_duration
 
-# Время последнего срабатывания тревоги (для cooldown)
-last_detection_time = 0.0
-COOLDOWN = 5.0
+# --------------------- ПАРАМЕТРЫ ДЛЯ ML-МОДЕЛИ ---------------------
+model = None  # здесь будет загружена drone_model.pkl
+
 
 ################################################################################
-# Загрузка дрона при старте
+# Загрузка данных при старте приложения
 ################################################################################
 @app.on_event("startup")
-def load_drone_sample():
-    global drone_mfcc
+def startup_event():
+    global drone_mfcc, model
+
+    # 1) Загружаем эталон для корреляции
     try:
         audio, _ = librosa.load("drone_sample.wav", sr=SAMPLE_RATE)
         drone_mfcc = librosa.feature.mfcc(y=audio, sr=SAMPLE_RATE, n_mfcc=13)
-        print("drone_sample.wav loaded OK.")
+        print("drone_sample.wav loaded OK (для корреляции).")
     except Exception as e:
-        print("Failed to load drone_sample.wav:", e)
+        print("Failed to load drone_sample.wav for correlation:", e)
+
+    # 2) Загружаем обученную ML-модель (drone_model.pkl)
+    try:
+        with open("drone_model.pkl", "rb") as f:
+            model = pickle.load(f)
+        print("drone_model.pkl loaded OK (ML-модель).")
+    except Exception as e:
+        print("Failed to load drone_model.pkl:", e)
+
 
 ################################################################################
 # Вспомогательные функции
 ################################################################################
+
 def clamp_audio(audio: np.ndarray) -> np.ndarray:
+    """Убираем NaN, inf, и прижимаем к [-1..1]."""
     audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
     return np.clip(audio, -1.0, 1.0)
 
+def normalize_audio(x: np.ndarray) -> np.ndarray:
+    """Нормализация громкости."""
+    return x / np.max(np.abs(x)) if np.max(np.abs(x)) != 0 else x
+
 def compute_correlation(ref_mfcc, test_audio):
+    """Старый метод: корреляция MFCC c эталоном."""
     if ref_mfcc is None or len(test_audio) < 100:
         return 0.0
     try:
@@ -77,16 +96,32 @@ def compute_correlation(ref_mfcc, test_audio):
         corr = np.corrcoef(s_trim.flatten(), t_trim.flatten())[0, 1]
         if np.isnan(corr):
             corr = 0.0
-        return corr if corr > 0 else 0
+        # Отбрасываем отрицательные корреляции
+        return corr if corr > 0 else 0.0
     except Exception as ex:
         print("compute_correlation error:", ex)
         return 0.0
 
+def extract_features_for_ml(test_audio):
+    """Функция, аналогичная train_model.py:
+       Берём MFCC, усредняем - для ML-модели."""
+    try:
+        test_audio = clamp_audio(test_audio)
+        test_audio = normalize_audio(test_audio)
+        # получаем MFCC
+        mfcc = librosa.feature.mfcc(y=test_audio, sr=SAMPLE_RATE, n_mfcc=13)
+        # усредняем по времени (axis=1 → строка)
+        feats = np.mean(mfcc, axis=1)
+        return feats
+    except Exception as e:
+        print("extract_features_for_ml error:", e)
+        return None
+
 def generate_spectrogram(wave: np.ndarray):
     """Создаем спектрограмму из массива wave (float32, -1..1).
-       Возвращаем base64 PNG.
-    """
+       Возвращаем base64 PNG."""
     wave = clamp_audio(wave)
+
     fig, ax = plt.subplots(figsize=(3, 2), dpi=100)
     D = np.abs(librosa.stft(wave, n_fft=512))**2
     S = librosa.power_to_db(D, ref=np.max)
@@ -104,52 +139,52 @@ def generate_spectrogram(wave: np.ndarray):
     b64_str = base64.b64encode(buf.read()).decode('utf-8')
     return "data:image/png;base64," + b64_str
 
-def normalize_audio(x: np.ndarray) -> np.ndarray:
-    return x / np.max(np.abs(x)) if np.max(np.abs(x)) != 0 else x
-
-
-
 
 ################################################################################
-# WebSocket
+# WebSocket — основной цикл получения звука
 ################################################################################
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     global RING_BUFFER, RING_BUFFER_MAXSIZE
     global last_detection_time, global_threshold, global_buffer_duration
+    global corr_streak
 
     await ws.accept()
     print("[WS] Client connected.")
 
-    # Локальная история корреляций, чтобы посылать на график
     correlation_history = []
 
     try:
         while True:
-            # Ждём сообщение (bytes или text)
             msg = await ws.receive_text()
-            # msg вида: "AUDIO|BASE64" или "PARAMS|threshold=...,buffer=..."
-            # Упростим: будем ожидать text, в котором есть "type=..."
+            # msg формата "AUDIO|{base64}" или "PARAMS|threshold=...,buffer=..."
 
             if msg.startswith("AUDIO|"):
-                # После "AUDIO|" идёт base64 PCM int16
+                # 1) Раскодируем base64 → int16 → float32 в [-1..1]
                 encoded_pcm = msg[6:]
                 raw = base64.b64decode(encoded_pcm)
                 chunk_arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-                # Складываем в кольцевой буфер
+                # 2) Накапливаем в кольцевой буфер
                 for s in chunk_arr:
                     RING_BUFFER.append(s)
-                # Если переполнилось, dequeue выбросит старые
+                if len(RING_BUFFER) > RING_BUFFER_MAXSIZE:
+                    # если переполнилось — удалим лишнее
+                    for _ in range(len(RING_BUFFER) - RING_BUFFER_MAXSIZE):
+                        RING_BUFFER.popleft()
 
-                # Если накопилось >= RING_BUFFER_MAXSIZE, считаем корреляцию
+                # 3) Если буфер заполнился
                 if len(RING_BUFFER) >= RING_BUFFER_MAXSIZE:
                     wave = np.array(RING_BUFFER, dtype=np.float32)
+
+                    # ==========================
+                    # СТАРЫЙ МЕТОД (Корреляция)
+                    # ==========================
                     corr = compute_correlation(drone_mfcc, wave)
                     correlation_history.append(corr)
 
-                    # Проверка дрона
-                    detected = False
+                    # Логика "corr_streak"
+                    detected_corr = False
                     if corr > global_threshold:
                         corr_streak += 1
                     else:
@@ -157,48 +192,56 @@ async def websocket_endpoint(ws: WebSocket):
 
                     now = time.time()
                     if corr_streak >= 2 and (now - last_detection_time > COOLDOWN):
-                        detected = True
+                        detected_corr = True
                         last_detection_time = now
 
-                    # Генерим спектрограмму
+                    # ==========================
+                    # НОВЫЙ МЕТОД (ML-модель)
+                    # ==========================
+                    detected_ml = False
+                    feats = extract_features_for_ml(wave)
+                    if feats is not None and model is not None:
+                        pred = model.predict([feats])[0]  # 0 или 1
+                        if pred == 1:
+                            detected_ml = True
+
+                    # ==========================
+                    # Итоговое решение (пример: ИЛИ)
+                    # ==========================
+                    # если хотя бы один метод сказал "дрон" → "дрон"
+                    detected_final = (detected_corr or detected_ml)
+
+                    # Генерим спектрограмму (для визуализации)
                     spec_b64 = generate_spectrogram(wave)
 
-                    # Сбрасываем буфер (можно «скользящее окно», но упростим)
+                    # Очистим буфер (упрощённо)
                     RING_BUFFER.clear()
 
-                    # Отправим JSON со структурой
-                    # corr=..., detected=..., spec=...
-                    # + history (последние 20 значений)
-                    hlast = correlation_history[-20:]
+                    # Формируем ответ
+                    hlast = correlation_history[-20:]  # последние 20 корр
                     payload = {
                         "type": "ANALYSIS",
                         "corr": corr,
-                        "detected": detected,
+                        "detected_corr": detected_corr,
+                        "detected_ml": detected_ml,
+                        "detected_final": detected_final,
                         "spectrogram": spec_b64,
                         "history": hlast
                     }
                     await ws.send_json(payload)
 
             elif msg.startswith("PARAMS|"):
-                # например: "PARAMS|threshold=0.98,buffer=5"
+                # Обновляем порог и длину буфера
                 param_str = msg[7:]
-                # threshold=0.98,buffer=5
                 parts = param_str.split(",")
-                thr_part = parts[0]  # threshold=0.98
-                buf_part = parts[1]  # buffer=5
-
-                thr_val = float(thr_part.split("=")[1])
-                buf_val = float(buf_part.split("=")[1])
+                thr_val = float(parts[0].split("=")[1])
+                buf_val = float(parts[1].split("=")[1])
 
                 global_threshold = thr_val
                 global_buffer_duration = buf_val
-                # пересчитаем RING_BUFFER_MAXSIZE
                 RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * global_buffer_duration)
-
-                # Сбросим буфер при смене настроек
                 RING_BUFFER.clear()
 
-                # Ответим подтверждением
                 resp = {
                     "type": "PARAMS_ACK",
                     "threshold": global_threshold,
