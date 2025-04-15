@@ -1,16 +1,59 @@
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>ML-only Drone Detector</title>
+  <title>Минимальный ML Детектор</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      margin: 0 auto;
+      max-width: 500px;
+      font-family: sans-serif;
+      padding: 8px;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+    .btn-row {
+      margin-top: 10px;
+    }
+    button {
+      font-size: 1.1em;
+      margin-right: 8px;
+      margin-top: 5px;
+      padding: 6px 12px;
+    }
+    #rmsBar {
+      width: 0%;
+      height: 10px;
+      background: #06c;
+      transition: width 0.2s;
+    }
+    #rmsContainer {
+      width: 100%;
+      background: #ccc;
+      height: 10px;
+      margin-top: 5px;
+      margin-bottom: 10px;
+    }
+  </style>
 </head>
 <body>
-  <h1>Минимальный ML-детектор дрона</h1>
-  <button id="startBtn">Активировать</button>
-  <button id="stopBtn">Отключить</button>
+  <h1>ML Детектор</h1>
+
+  <div class="btn-row">
+    <button id="startBtn">Активировать</button>
+    <button id="stopBtn">Отключить</button>
+    <button id="testAlarmBtn">Тест Аларм</button>
+  </div>
 
   <p>Статус: <span id="statusSpan">ВЫКЛЮЧЕНА</span></p>
   <p>ML Ответ: <span id="mlResultSpan">-</span></p>
+  <p>Уровень (RMS): <span id="rmsSpan">0.00</span></p>
+  <div id="rmsContainer">
+    <div id="rmsBar"></div>
+  </div>
 
   <p id="alertP" style="display:none; color:red; font-weight:bold;">
     🚨 ДРОН ОБНАРУЖЕН!
