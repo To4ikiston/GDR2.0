@@ -24,20 +24,20 @@ const thVal        = document.getElementById("thVal");
 const rmsMinVal    = document.getElementById("rmsMinVal");
 const gainVal      = document.getElementById("gainVal");
 
-// текущее значение
+// Текущее значение
 let threshold = parseFloat(thRange.value);
 let curRmsMin = parseFloat(rmsMinRange.value);
 let curGain   = parseFloat(gainRange.value);
 
 function sendParams() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    // PARAMS|th=...,rms=...,gain=...
+    // "PARAMS|th=...,rms=...,gain=..."
     let msg = `PARAMS|th=${threshold},rms=${curRmsMin},gain=${curGain}`;
     ws.send(msg);
   }
 }
 
-// ползунки
+// Слайдеры
 thRange.oninput = () => {
   threshold = parseFloat(thRange.value);
   thVal.textContent = threshold.toFixed(2);
@@ -66,6 +66,7 @@ startBtn.onclick = async () => {
     const source = audioContext.createMediaStreamSource(mediaStream);
     workletNode = new AudioWorkletNode(audioContext, "pcm-writer");
 
+    // Сюда приходят PCM-фрагменты
     workletNode.port.onmessage = (ev) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         const base64data = btoa(String.fromCharCode(...new Uint8Array(ev.data.buffer)));
@@ -82,7 +83,7 @@ startBtn.onclick = async () => {
     ws.onopen = () => {
       console.log("[WS] connected");
       statusSpan.textContent = "РАБОТАЕТ";
-      sendParams(); // отправим начальные значения
+      sendParams(); // отправляем начальные значения порогов
     };
 
     ws.onmessage = (msg) => {
