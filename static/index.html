@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>ML Детектор (слайдеры)</title>
+  <title>Drone Detector ~5s</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     body {
@@ -35,39 +35,39 @@
   </style>
 </head>
 <body>
-  <h1>ML Детектор</h1>
+  <h1>Детектор (2×2.5сек)</h1>
+
   <div>
     <button id="startBtn">Активировать</button>
     <button id="stopBtn">Отключить</button>
-    <button id="testAlarmBtn">Тест Аларм</button>
+    <button id="testAlarmBtn">Тест</button>
   </div>
 
   <p>Статус: <span id="statusSpan">ВЫКЛЮЧЕНА</span></p>
-  <p>Результат ML: <span id="mlSpan">-</span></p>
-  <p>Уровень (RMS): <span id="rmsSpan">0.00</span></p>
-  <div id="rmsContainer">
-    <div id="rmsBar"></div>
-  </div>
+  <p>Вероятность дрона: <span id="probSpan">0.00</span></p>
+  <p>RMS: <span id="rmsSpan">0.00</span></p>
+  <div id="rmsContainer"><div id="rmsBar"></div></div>
+  <p>Результат: <span id="resultSpan">-</span></p>
 
-  <!-- Слайдеры -->
-  <div class="slider-block">
-    <label>Мин. RMS (<span id="rmsMinVal">0.05</span>)</label><br>
-    <input type="range" id="rmsMinRange" min="0" max="0.2" step="0.01" value="0.05">
-  </div>
-  <div class="slider-block">
-    <label>Gain (<span id="gainVal">10</span>)</label><br>
-    <input type="range" id="gainRange" min="1" max="20" step="1" value="10">
-  </div>
-  <div class="slider-block">
-    <label>ML Threshold (<span id="mlThreshVal">0.80</span>)</label><br>
-    <input type="range" id="mlThreshRange" min="0.5" max="0.99" step="0.01" value="0.80">
-  </div>
-
-  <p id="alertP" style="display:none; color:red; font-weight:bold; margin-top:15px;">
+  <p id="alertP" style="display:none; color:red; font-weight:bold;">
     🚨 ДРОН ОБНАРУЖЕН!
   </p>
 
   <audio id="alarmAudio" src="alarm.wav"></audio>
+
+  <!-- Слайдеры -->
+  <div class="slider-block">
+    <label>ML Threshold (th): <span id="thVal">0.80</span></label><br>
+    <input id="thRange" type="range" min="0.5" max="0.99" step="0.01" value="0.80">
+  </div>
+  <div class="slider-block">
+    <label>RMS Min (rms): <span id="rmsMinVal">0.05</span></label><br>
+    <input id="rmsMinRange" type="range" min="0" max="0.2" step="0.01" value="0.05">
+  </div>
+  <div class="slider-block">
+    <label>Gain (gain): <span id="gainVal">10</span></label><br>
+    <input id="gainRange" type="range" min="1" max="20" step="1" value="10">
+  </div>
 
   <script src="main.js"></script>
 </body>
