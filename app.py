@@ -23,21 +23,17 @@ def root():
 
 SAMPLE_RATE = 16000
 
-# по умолчанию 2.5 секунды
-BUFFER_DURATION = 2.5
+# Теперь 3 секунды — одна попытка
+BUFFER_DURATION = 3.0  
 RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * BUFFER_DURATION)
 
 COOLDOWN = 5.0
 last_detection_time = 0.0
 
 model = None
-ml_threshold = 0.8   # можно управлять слайдером
+ml_threshold = 0.8   # можно менять слайдером
 rms_min = 0.05       # отсечь тихие звуки
 gain_factor = 10.0   # усиление
-
-# ml_streak – сколько подряд буферов сказали «дрон»
-ml_streak = 0
-STREAK_NEEDED = 2   # хотим 2 интервала подряд (2.5s × 2 => 5s)
 
 RING_BUFFER = deque()
 
@@ -50,7 +46,7 @@ def load_model():
     try:
         with open("drone_model.pkl", "rb") as f:
             model = pickle.load(f)
-        print("drone_model.pkl loaded OK, with predict_proba hopefully.")
+        print("drone_model.pkl loaded OK, predict_proba() is ready.")
     except Exception as e:
         print("Failed to load drone_model.pkl:", e)
 
@@ -58,15 +54,18 @@ def load_model():
 # Вспомогательная функция извлечения признаков
 ################################################################################
 def extract_features(wave: np.ndarray):
-    # RMS
+    """
+    Извлекаем MFCC + проверяем RMS.
+    Вернёт (feats, rms) или (None, rms), если звук слишком тихий.
+    """
     rms = float(np.sqrt(np.mean(wave**2)))
     print(f"[DEBUG] RMS={rms:.3f}")
 
+    # Отсечём слишком тихие сигналы
     if rms < rms_min:
-        # слишком тихо
         return None, rms
 
-    # нормализуем + усиливаем
+    # Нормализуем + усиливаем (gain_factor)
     mx = np.max(np.abs(wave))
     if mx < 1e-9:
         return None, rms
@@ -88,28 +87,29 @@ def extract_features(wave: np.ndarray):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     global RING_BUFFER, RING_BUFFER_MAXSIZE
-    global ml_streak, last_detection_time
+    global last_detection_time
     global ml_threshold, rms_min, gain_factor
 
     await ws.accept()
-    print("[WS] Client connected (2 intervals, ~5s).")
+    print("[WS] Client connected (3sec attempt).")
 
     try:
         while True:
             msg = await ws.receive_text()
+
+            # Пришли сырые данные звука
             if msg.startswith("AUDIO|"):
-                # раскодируем PCM
                 rawb64 = msg[6:]
                 raw = base64.b64decode(rawb64)
                 chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-                # копим в кольцевом буфере
+                # Копим во временном буфере
                 for s in chunk:
                     RING_BUFFER.append(s)
                 while len(RING_BUFFER) > RING_BUFFER_MAXSIZE:
                     RING_BUFFER.popleft()
 
-                # если накопили 2.5 секунды
+                # Если накопилось >= 3с
                 if len(RING_BUFFER) >= RING_BUFFER_MAXSIZE:
                     wave = np.array(RING_BUFFER, dtype=np.float32)
                     RING_BUFFER.clear()
@@ -125,23 +125,17 @@ async def ws_endpoint(ws: WebSocket):
 
                         print(f"[DEBUG] prob(dron)={prob_dron:.3f}, threshold={ml_threshold}, RMS={rms_val:.3f}")
 
-                        # сравниваем c порогом
+                        # Если вероятность выше порога => дрон
                         if prob_dron >= ml_threshold:
-                            ml_streak += 1
-                        else:
-                            ml_streak = 0
-
-                        # если streak >= 2 => dron
-                        if ml_streak >= STREAK_NEEDED:
                             now = time.time()
                             if now - last_detection_time > COOLDOWN:
                                 detected_ml = True
                                 last_detection_time = now
                     else:
-                        # если feats = None => слабый звук
-                        ml_streak = 0
+                        # feats = None => звук слишком тихий
+                        pass
 
-                    # ответ клиенту
+                    # Отправим результат клиенту
                     payload = {
                         "type": "ML_ANALYSIS",
                         "prob": prob_dron,
@@ -150,8 +144,8 @@ async def ws_endpoint(ws: WebSocket):
                     }
                     await ws.send_json(payload)
 
+            # Параметры слайдеров
             elif msg.startswith("PARAMS|"):
-                # msg = "PARAMS|th=0.9,rms=0.1,gain=5"
                 param_str = msg[7:]
                 parts = param_str.split(",")
                 for p in parts:
