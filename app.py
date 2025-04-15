@@ -79,8 +79,16 @@ def clamp_audio(audio: np.ndarray) -> np.ndarray:
     return np.clip(audio, -1.0, 1.0)
 
 def normalize_audio(x: np.ndarray) -> np.ndarray:
-    """Нормализация громкости."""
-    return x / np.max(np.abs(x)) if np.max(np.abs(x)) != 0 else x
+    # Пик-нормализация
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    maximum = np.max(np.abs(x))
+    if maximum < 1e-9:
+        return x
+    x = x / maximum
+    # Допустим, ещё умножить на 5
+    x = x * 5.0
+    # А потом, если снова превысили [-1..1], прижать:
+    return np.clip(x, -1.0, 1.0)
 
 def compute_correlation(ref_mfcc, test_audio):
     """Старый метод: корреляция MFCC c эталоном."""
@@ -180,6 +188,9 @@ async def websocket_endpoint(ws: WebSocket):
                     # ==========================
                     # СТАРЫЙ МЕТОД (Корреляция)
                     # ==========================
+                     # >>> Вставляем лог RMS:
+                    rms = np.sqrt(np.mean(wave**2))
+                    print(f"[DEBUG] RMS = {rms:.6f}")
                     corr = compute_correlation(drone_mfcc, wave)
                     correlation_history.append(corr)
 
