@@ -9,50 +9,50 @@ const stopBtn      = document.getElementById("stopBtn");
 const testAlarmBtn = document.getElementById("testAlarmBtn");
 
 const statusSpan   = document.getElementById("statusSpan");
-const mlSpan       = document.getElementById("mlSpan");
-const alertP       = document.getElementById("alertP");
-const alarmAudio   = document.getElementById("alarmAudio");
+const probSpan     = document.getElementById("probSpan");
 const rmsSpan      = document.getElementById("rmsSpan");
 const rmsBar       = document.getElementById("rmsBar");
+const resultSpan   = document.getElementById("resultSpan");
+const alertP       = document.getElementById("alertP");
+const alarmAudio   = document.getElementById("alarmAudio");
 
-// Слайдеры
+const thRange      = document.getElementById("thRange");
 const rmsMinRange  = document.getElementById("rmsMinRange");
 const gainRange    = document.getElementById("gainRange");
-const mlThreshRange= document.getElementById("mlThreshRange");
 
+const thVal        = document.getElementById("thVal");
 const rmsMinVal    = document.getElementById("rmsMinVal");
 const gainVal      = document.getElementById("gainVal");
-const mlThreshVal  = document.getElementById("mlThreshVal");
 
-// текущие значения
-let rmsMin    = parseFloat(rmsMinRange.value);
-let gain      = parseFloat(gainRange.value);
-let mlThresh  = parseFloat(mlThreshRange.value);
-
-// При изменении слайдеров
-rmsMinRange.oninput = () => {
-  rmsMin = parseFloat(rmsMinRange.value);
-  rmsMinVal.textContent = rmsMin.toFixed(2);
-  sendParams();
-};
-gainRange.oninput = () => {
-  gain = parseFloat(gainRange.value);
-  gainVal.textContent = gain.toFixed(0);
-  sendParams();
-};
-mlThreshRange.oninput = () => {
-  mlThresh = parseFloat(mlThreshRange.value);
-  mlThreshVal.textContent = mlThresh.toFixed(2);
-  sendParams();
-};
+// текущее значение
+let threshold = parseFloat(thRange.value);
+let curRmsMin = parseFloat(rmsMinRange.value);
+let curGain   = parseFloat(gainRange.value);
 
 function sendParams() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    // отправим, например, "PARAMS|rms=0.05,gain=10,mlth=0.80"
-    let msg = `PARAMS|rms=${rmsMin},gain=${gain},mlth=${mlThresh}`;
+    // PARAMS|th=...,rms=...,gain=...
+    let msg = `PARAMS|th=${threshold},rms=${curRmsMin},gain=${curGain}`;
     ws.send(msg);
   }
 }
+
+// ползунки
+thRange.oninput = () => {
+  threshold = parseFloat(thRange.value);
+  thVal.textContent = threshold.toFixed(2);
+  sendParams();
+};
+rmsMinRange.oninput = () => {
+  curRmsMin = parseFloat(rmsMinRange.value);
+  rmsMinVal.textContent = curRmsMin.toFixed(2);
+  sendParams();
+};
+gainRange.oninput = () => {
+  curGain = parseFloat(gainRange.value);
+  gainVal.textContent = curGain.toFixed(0);
+  sendParams();
+};
 
 startBtn.onclick = async () => {
   if (isActive) return;
@@ -66,12 +66,13 @@ startBtn.onclick = async () => {
     const source = audioContext.createMediaStreamSource(mediaStream);
     workletNode = new AudioWorkletNode(audioContext, "pcm-writer");
 
-    workletNode.port.onmessage = (evt) => {
+    workletNode.port.onmessage = (ev) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        const base64data = btoa(String.fromCharCode(...new Uint8Array(evt.data.buffer)));
+        const base64data = btoa(String.fromCharCode(...new Uint8Array(ev.data.buffer)));
         ws.send("AUDIO|" + base64data);
       }
     };
+
     source.connect(workletNode).connect(audioContext.destination);
 
     let proto = (location.protocol === 'https:') ? 'wss' : 'ws';
@@ -88,19 +89,24 @@ startBtn.onclick = async () => {
       try {
         let data = JSON.parse(msg.data);
         if (data.type === "ML_ANALYSIS") {
-          // detected, rms
-          mlSpan.textContent = data.detected ? "ДРОН" : "нет";
-          let curRms = data.rms || 0;
-          rmsSpan.textContent = curRms.toFixed(2);
+          let prob = data.prob || 0;
+          let rms = data.rms || 0;
+          let detected = data.detected;
 
-          let pct = Math.min(100, Math.round(curRms * 100));
+          probSpan.textContent = prob.toFixed(3);
+          rmsSpan.textContent = rms.toFixed(3);
+
+          // RMS bar
+          let pct = Math.min(100, Math.round(rms * 100));
           rmsBar.style.width = pct + "%";
 
-          if (data.detected) {
+          if (detected) {
+            resultSpan.textContent = "ДРОН!";
             alertP.style.display = "block";
             alarmAudio.currentTime = 0;
-            alarmAudio.play().catch(e => console.log("autoPlay blocked:", e));
+            alarmAudio.play().catch(e => console.log("autoplay blocked:", e));
           } else {
+            resultSpan.textContent = "нет";
             alertP.style.display = "none";
           }
         }
@@ -110,14 +116,15 @@ startBtn.onclick = async () => {
     ws.onclose = () => {
       console.log("[WS] closed");
       statusSpan.textContent = "ВЫКЛЮЧЕНА";
-      mlSpan.textContent = "-";
-      alertP.style.display = "none";
+      probSpan.textContent = "0.00";
       rmsSpan.textContent = "0.00";
       rmsBar.style.width = "0%";
+      resultSpan.textContent = "-";
+      alertP.style.display = "none";
     };
 
   } catch (err) {
-    alert("Ошибка микрофона: " + err);
+    alert("Ошибка при доступе к микрофону: " + err);
     isActive = false;
   }
 };
@@ -138,14 +145,16 @@ stopBtn.onclick = () => {
     ws.close();
     ws = null;
   }
+
   statusSpan.textContent = "ВЫКЛЮЧЕНА";
-  mlSpan.textContent = "-";
-  alertP.style.display = "none";
+  probSpan.textContent = "0.00";
   rmsSpan.textContent = "0.00";
   rmsBar.style.width = "0%";
+  resultSpan.textContent = "-";
+  alertP.style.display = "none";
 };
 
 testAlarmBtn.onclick = () => {
   alarmAudio.currentTime = 0;
-  alarmAudio.play().catch(e => console.log("Manual play blocked:", e));
+  alarmAudio.play().catch(e => console.log("Manual alarm error:", e));
 };
