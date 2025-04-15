@@ -12,6 +12,7 @@ from collections import deque
 
 app = FastAPI()
 
+# Подключаем статические файлы
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -23,14 +24,14 @@ def root():
 ################################################################################
 
 SAMPLE_RATE = 16000
-BUFFER_DURATION = 3        # 3 секунды
-model = None               # ML-модель
-COOLDOWN = 5.0             # задержка между сигналами
-last_detection_time = 0.0  # когда последний раз сигналили
+BUFFER_DURATION = 3  # 3 секунды
+model = None         # ML-модель
 
-# Кольцевой буфер на 3 сек
+COOLDOWN = 5.0
+last_detection_time = 0.0
+
 RING_BUFFER = deque()
-RING_BUFFER_MAXSIZE = SAMPLE_RATE * BUFFER_DURATION
+RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * BUFFER_DURATION)
 
 ################################################################################
 # Загрузка модели
@@ -46,84 +47,80 @@ def load_model():
         print("Failed to load drone_model.pkl:", e)
 
 ################################################################################
-# Минимальная функция извлечения признаков
+# Функция извлечения признаков
 ################################################################################
 def extract_features(wave: np.ndarray):
-    # Упростим: пик-нормализация + умножим на 5
+    # Логируем RMS, чтобы понять громкость
+    rms = float(np.sqrt(np.mean(wave**2)))
+    print(f"[DEBUG] RMS = {rms:.5f}")
+
+    # Упростим нормализацию: пик + умножим на 10
     mx = np.max(np.abs(wave))
     if mx < 1e-9:
-        return None
+        return None, rms
     wave = wave / mx
-    wave *= 5.0
+    wave *= 10.0
     wave = np.clip(wave, -1, 1)
 
-    # MFCC
     try:
         mfcc = librosa.feature.mfcc(y=wave, sr=SAMPLE_RATE, n_mfcc=13)
         feats = np.mean(mfcc, axis=1)  # усреднение
-        return feats
-    except:
-        return None
+        return feats, rms
+    except Exception as ex:
+        print("extract_features error:", ex)
+        return None, rms
 
 ################################################################################
 # WebSocket
 ################################################################################
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    global RING_BUFFER, RING_BUFFER_MAXSIZE, last_detection_time
+    global RING_BUFFER, RING_BUFFER_MAXSIZE, last_detection_time, model
 
     await ws.accept()
-    print("[WS] Client connected (ML-only).")
+    print("[WS] Client connected (ML + RMS).")
 
     try:
         while True:
             msg = await ws.receive_text()
             if msg.startswith("AUDIO|"):
-                encoded_pcm = msg[6:]
-                raw = base64.b64decode(encoded_pcm)
+                base64pcm = msg[6:]
+                raw = base64.b64decode(base64pcm)
                 chunk_arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-                # накапливаем в буфер
+                # накапливаем
                 for sample in chunk_arr:
                     RING_BUFFER.append(sample)
                 while len(RING_BUFFER) > RING_BUFFER_MAXSIZE:
                     RING_BUFFER.popleft()
 
-                # если накопили 3 сек
+                # если накопили 3 секунды
                 if len(RING_BUFFER) >= RING_BUFFER_MAXSIZE:
                     wave = np.array(RING_BUFFER, dtype=np.float32)
-
-                    # очистим буфер
                     RING_BUFFER.clear()
 
-                    # Извлекаем признаки
-                    feats = extract_features(wave)
+                    feats, rms = extract_features(wave)
                     detected = False
                     if feats is not None and model is not None:
-                        pred = model.predict([feats])[0]  # 0 или 1
+                        pred = model.predict([feats])[0]
                         if pred == 1:
-                            # проверим cooldown
                             now = time.time()
                             if now - last_detection_time > COOLDOWN:
                                 detected = True
                                 last_detection_time = now
-                    
-                    # отсылаем назад
+
                     payload = {
                         "type": "ML_ANALYSIS",
-                        "detected": detected
+                        "detected": detected,
+                        "rms": rms
                     }
+                    print("[DEBUG] sending:", payload)
                     await ws.send_json(payload)
 
             else:
                 print("[WS] Unknown message:", msg)
 
     except Exception as e:
-        print("[WS] Error:", e)
+        print("[WS] error:", e)
 
     print("[WS] disconnected.")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000)
