@@ -22,23 +22,27 @@ def root():
 ################################################################################
 
 SAMPLE_RATE = 16000
-BUFFER_DURATION = 3  # сек записи
-model = None
+
+# по умолчанию 2.5 секунды
+BUFFER_DURATION = 2.5
+RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * BUFFER_DURATION)
 
 COOLDOWN = 5.0
 last_detection_time = 0.0
 
-# ПЕРЕМЕННЫЕ, которые управляются ползунками
-rms_min = 0.05        # отсекаем тихое, ползунок [0..0.2]
-gain_factor = 10.0    # усиливаем сигнал, ползунок [1..20]
-ml_threshold = 0.80   # вероятность дрона, ползунок [0.5..0.99]
+model = None
+ml_threshold = 0.8   # можно управлять слайдером
+rms_min = 0.05       # отсечь тихие звуки
+gain_factor = 10.0   # усиление
 
-# Кольцевой буфер 3 сек
+# ml_streak – сколько подряд буферов сказали «дрон»
+ml_streak = 0
+STREAK_NEEDED = 2   # хотим 2 интервала подряд (2.5s × 2 => 5s)
+
 RING_BUFFER = deque()
-RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * BUFFER_DURATION)
 
 ################################################################################
-# Загрузка модели
+# ЗАГРУЗКА МОДЕЛИ
 ################################################################################
 @app.on_event("startup")
 def load_model():
@@ -46,29 +50,28 @@ def load_model():
     try:
         with open("drone_model.pkl", "rb") as f:
             model = pickle.load(f)
-        print("drone_model.pkl loaded OK (with predict_proba hopefully).")
+        print("drone_model.pkl loaded OK, with predict_proba hopefully.")
     except Exception as e:
         print("Failed to load drone_model.pkl:", e)
 
 ################################################################################
-# Извлечение признаков
+# Вспомогательная функция извлечения признаков
 ################################################################################
-def extract_features(wave: np.ndarray, rms_min: float, gain: float):
+def extract_features(wave: np.ndarray):
     # RMS
     rms = float(np.sqrt(np.mean(wave**2)))
-    print(f"[DEBUG] RMS = {rms:.3f}")
+    print(f"[DEBUG] RMS={rms:.3f}")
 
-    # если слишком тихо, не анализируем
     if rms < rms_min:
+        # слишком тихо
         return None, rms
 
-    # нормализуем
+    # нормализуем + усиливаем
     mx = np.max(np.abs(wave))
     if mx < 1e-9:
         return None, rms
     wave = wave / mx
-    # усиливаем
-    wave *= gain
+    wave *= gain_factor
     wave = np.clip(wave, -1.0, 1.0)
 
     try:
@@ -80,71 +83,89 @@ def extract_features(wave: np.ndarray, rms_min: float, gain: float):
         return None, rms
 
 ################################################################################
-# WebSocket
+# WEB SOCKET
 ################################################################################
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     global RING_BUFFER, RING_BUFFER_MAXSIZE
-    global last_detection_time
-    global rms_min, gain_factor, ml_threshold
+    global ml_streak, last_detection_time
+    global ml_threshold, rms_min, gain_factor
 
     await ws.accept()
-    print("[WS] Client connected (ML with sliders).")
+    print("[WS] Client connected (2 intervals, ~5s).")
 
     try:
         while True:
             msg = await ws.receive_text()
             if msg.startswith("AUDIO|"):
-                # раскодируем PCM int16
+                # раскодируем PCM
                 rawb64 = msg[6:]
                 raw = base64.b64decode(rawb64)
                 chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-                for sample in chunk:
-                    RING_BUFFER.append(sample)
+                # копим в кольцевом буфере
+                for s in chunk:
+                    RING_BUFFER.append(s)
                 while len(RING_BUFFER) > RING_BUFFER_MAXSIZE:
                     RING_BUFFER.popleft()
 
-                # если собрали 3 секунды
+                # если накопили 2.5 секунды
                 if len(RING_BUFFER) >= RING_BUFFER_MAXSIZE:
                     wave = np.array(RING_BUFFER, dtype=np.float32)
                     RING_BUFFER.clear()
 
-                    feats, rms_val = extract_features(wave, rms_min, gain_factor)
-                    detected = False
+                    feats, rms_val = extract_features(wave)
+                    prob_dron = 0.0
+                    detected_ml = False
+
                     if feats is not None and model is not None:
-                        # смотрим predict_proba
-                        prob = model.predict_proba([feats])[0][1]
-                        print(f"[DEBUG] prob(drone)={prob:.3f}, ml_threshold={ml_threshold:.2f}, RMS={rms_val:.3f}")
-                        if prob > ml_threshold:
+                        # predict_proba => [prob_class0, prob_class1]
+                        probs = model.predict_proba([feats])[0]
+                        prob_dron = probs[1]
+
+                        print(f"[DEBUG] prob(dron)={prob_dron:.3f}, threshold={ml_threshold}, RMS={rms_val:.3f}")
+
+                        # сравниваем c порогом
+                        if prob_dron >= ml_threshold:
+                            ml_streak += 1
+                        else:
+                            ml_streak = 0
+
+                        # если streak >= 2 => dron
+                        if ml_streak >= STREAK_NEEDED:
                             now = time.time()
                             if now - last_detection_time > COOLDOWN:
-                                detected = True
+                                detected_ml = True
                                 last_detection_time = now
+                    else:
+                        # если feats = None => слабый звук
+                        ml_streak = 0
 
-                    resp = {
+                    # ответ клиенту
+                    payload = {
                         "type": "ML_ANALYSIS",
-                        "detected": detected,
-                        "rms": rms_val
+                        "prob": prob_dron,
+                        "rms": rms_val,
+                        "detected": detected_ml
                     }
-                    await ws.send_json(resp)
+                    await ws.send_json(payload)
 
             elif msg.startswith("PARAMS|"):
-                # пример "PARAMS|rms=0.10,gain=15,mlth=0.90"
+                # msg = "PARAMS|th=0.9,rms=0.1,gain=5"
                 param_str = msg[7:]
                 parts = param_str.split(",")
                 for p in parts:
                     k, v = p.split("=")
-                    if k == "rms":
+                    if k == "th":
+                        ml_threshold = float(v)
+                    elif k == "rms":
                         rms_min = float(v)
                     elif k == "gain":
                         gain_factor = float(v)
-                    elif k == "mlth":
-                        ml_threshold = float(v)
-                print(f"[WS] Updated sliders: rms_min={rms_min}, gain={gain_factor}, ml_threshold={ml_threshold}")
+                print(f"[WS] Updated sliders => ml_threshold={ml_threshold}, rms_min={rms_min}, gain_factor={gain_factor}")
 
             else:
-                print("[WS] Unknown message:", msg)
+                print("[WS] Unknown msg:", msg)
 
     except Exception as e:
         print("[WS] Error:", e)
