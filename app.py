@@ -27,8 +27,8 @@ SAMPLE_RATE = 16000
 BUFFER_DURATION = 3.0  
 RING_BUFFER_MAXSIZE = int(SAMPLE_RATE * BUFFER_DURATION)
 
-COOLDOWN = 5.0
-last_detection_time = 0.0
+#COOLDOWN = 5.0
+#last_detection_time = 0.0
 
 model = None
 ml_threshold = 0.8   # можно менять слайдером
@@ -127,10 +127,8 @@ async def ws_endpoint(ws: WebSocket):
 
                         # Если вероятность выше порога => дрон
                         if prob_dron >= ml_threshold:
-                            now = time.time()
-                            if now - last_detection_time > COOLDOWN:
-                                detected_ml = True
-                                last_detection_time = now
+                            detected_ml = True
+
                     else:
                         # feats = None => звук слишком тихий
                         pass
