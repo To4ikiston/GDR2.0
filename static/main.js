@@ -1,15 +1,19 @@
-let ws;
+let ws = null;
 let isActive = false;
+
 let mediaStream = null;
 let audioContext = null;
 let workletNode = null;
 
-const startBtn = document.getElementById("startBtn");
-const stopBtn  = document.getElementById("stopBtn");
-const statusSpan = document.getElementById("statusSpan");
-const alertP = document.getElementById("alertP");
-const mlResultSpan = document.getElementById("mlResultSpan");
-const alarmAudio = document.getElementById("alarmAudio");
+const startBtn      = document.getElementById("startBtn");
+const stopBtn       = document.getElementById("stopBtn");
+const testAlarmBtn  = document.getElementById("testAlarmBtn");
+const statusSpan    = document.getElementById("statusSpan");
+const mlResultSpan  = document.getElementById("mlResultSpan");
+const alertP        = document.getElementById("alertP");
+const alarmAudio    = document.getElementById("alarmAudio");
+const rmsSpan       = document.getElementById("rmsSpan");
+const rmsBar        = document.getElementById("rmsBar");
 
 startBtn.onclick = async () => {
   if (isActive) return;
@@ -24,6 +28,7 @@ startBtn.onclick = async () => {
     workletNode = new AudioWorkletNode(audioContext, "pcm-writer");
 
     workletNode.port.onmessage = (evt) => {
+      // PCM int16
       if (ws && ws.readyState === WebSocket.OPEN) {
         const base64data = btoa(String.fromCharCode(...new Uint8Array(evt.data.buffer)));
         ws.send("AUDIO|" + base64data);
@@ -32,7 +37,7 @@ startBtn.onclick = async () => {
 
     source.connect(workletNode).connect(audioContext.destination);
 
-    let proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+    let proto = (location.protocol === "https:") ? "wss" : "ws";
     let wsUrl = `${proto}://${location.host}/ws`;
     ws = new WebSocket(wsUrl);
 
@@ -42,22 +47,33 @@ startBtn.onclick = async () => {
     };
 
     ws.onmessage = (msg) => {
-      // ожидаем JSON
       try {
-        let data = JSON.parse(msg.data);
+        const data = JSON.parse(msg.data);
         if (data.type === "ML_ANALYSIS") {
-          // data.detected = true/false
+          // data.detected, data.rms
           mlResultSpan.textContent = data.detected ? "ДРОН" : "нет";
-
           if (data.detected) {
             alertP.style.display = "block";
             alarmAudio.currentTime = 0;
-            alarmAudio.play().catch(e => console.log("autoPlay error", e));
+            alarmAudio.play().catch(e => console.log("Autoplay blocked:", e));
           } else {
             alertP.style.display = "none";
           }
+          // RMS
+          rmsSpan.textContent = data.rms.toFixed(2);
+          let pct = Math.min(100, Math.round(data.rms * 100));
+          rmsBar.style.width = pct + "%";
+          if (pct < 10) {
+            rmsBar.style.background = "gray";
+          } else if (pct < 40) {
+            rmsBar.style.background = "orange";
+          } else {
+            rmsBar.style.background = "red";
+          }
         }
-      } catch {}
+      } catch (ex) {
+        console.log("[WS] Not JSON or error:", ex);
+      }
     };
 
     ws.onclose = () => {
@@ -65,11 +81,13 @@ startBtn.onclick = async () => {
       statusSpan.textContent = "ВЫКЛЮЧЕНА";
       mlResultSpan.textContent = "-";
       alertP.style.display = "none";
+      rmsSpan.textContent = "0.00";
+      rmsBar.style.width = "0%";
     };
 
   } catch (err) {
-    console.log("Error audio:", err);
-    alert("Не удалось подключить микрофон: " + err);
+    console.error("Error audio:", err);
+    alert("Не удалось включить микрофон: " + err);
     isActive = false;
   }
 };
@@ -93,4 +111,12 @@ stopBtn.onclick = () => {
   statusSpan.textContent = "ВЫКЛЮЧЕНА";
   mlResultSpan.textContent = "-";
   alertP.style.display = "none";
+  rmsSpan.textContent = "0.00";
+  rmsBar.style.width = "0%";
+};
+
+testAlarmBtn.onclick = () => {
+  // Просто вручную проигрываем звук
+  alarmAudio.currentTime = 0;
+  alarmAudio.play().catch(err => console.log("Autoplay error:", err));
 };
